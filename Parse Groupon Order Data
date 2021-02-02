@@ -1,0 +1,133 @@
+/*
+This code is for parsing the JSON order data that get by below API in the SQL Server under version 2016 :
+https://scm.commerceinterface.com/api/v4/get_orders
+From SQL Server 2016, can use OPENJOSON
+I am not testing it completely
+*/
+
+            DECLARE @response NVARCHAR(max)=NULL 
+
+
+            SELECT @response='{"meta": {"no_of_pages": 1,"current_page": 1,"max_items_per_page": 250,"no_of_items": 1},"data": [{"orderid": "FFB7A681BE","parent_orderid": "12345","customer": {"city": "BRADFORD","state": null,"name": "SOME BODY HERE","zip": "SOME ZIP","country": null,"address1": "901","address2": "GREENFIELDS LANE","phone": "01234 982103"},"line_items": [{"status": "open","weight": 0.0,"bom_sku": "2xAB831337NH09","gg_account_number": "332312","opp_name": "OPPORTUNITY NAME","ci_lineitemid": 54553918,"sku": "024409387203","permalink": "SOME PERMALINK","name": "SOME PACK OF 6","po_number": "SOME PO NUMER","channel_sku_provided": "a0YC000000TTsch","fulfillment_lineitem_id": "34054258","unit_price": 10.99,"gift_message": "SOME GIFT MESSAGE","quantity": 1,"groupon_cost" : 12.09,"ship_by_date": "02/16/2015 08:10AM UTC"}],"shipping": {"product_dimension_unit": "inches","product_weight": "1.93","product_weight_unit": "pounds","incoterms": "INCO TERMS","3PL_warehouse": "OH","3PL_name": "INNOTRAC","product_width": "1.5","product_length": "12.75","carrier": "UPS","product_height": "12.75","hts_code": "","method": "BEST"},"date": "01/16/2015 08:10AM UTC","amount": {"total": 10.99,"shipping": 0},"supplier": "SUPPLIER NAME","opp_id": "OPPORTUNITY ID","fulfillment_method": "FULFILLMENT METHOD"}],"success": true}'
+            IF OBJECT_ID('tempdb..#ResponseData') IS NOT NULL DROP TABLE #ResponseData
+            CREATE TABLE #ResponseData (ElementId INT ,SequenceNo [int],ParentID INT,ObjectID INT,NodeName NVARCHAR(2000),StringValue NVARCHAR(MAX) NOT NULL,ValueType VARCHAR(10) NOT null)
+            
+            INSERT INTO #ResponseData
+            SELECT* FROM dbo.fn_ParseJSON(@response)
+
+            DECLARE @LineCount INT ,@offset INT
+            SELECT @LineCount=CONVERT(INT, t.StringValue)
+            FROM  #ResponseData AS t
+            WHERE t.NodeName='no_of_items'
+            PRINT @LineCount
+
+
+            IF OBJECT_ID('tempdb..#orderlists') IS NOT NULL DROP TABLE #orderlists
+            IF OBJECT_ID('tempdb..#NodeRef') IS NOT NULL DROP TABLE #NodeRef 
+            IF OBJECT_ID('tempdb..#orderheader') IS NOT NULL DROP TABLE #orderheader
+            IF OBJECT_ID('tempdb..#ordercustomer') IS NOT NULL DROP TABLE #ordercustomer 
+            IF OBJECT_ID('tempdb..#orderitems') IS NOT NULL DROP TABLE #orderitems 
+            IF OBJECT_ID('tempdb..#ordershipping') IS NOT NULL DROP TABLE #ordershipping 
+            CREATE TABLE #orderlists(ID INT IDENTITY(1,1),HeaderID INT,OrderID VARCHAR(255))
+            CREATE TABLE #orderheader(ID INT IDENTITY(1,1),[orderid] VARCHAR(255),OrderFileID INT,[parent_orderid] VARCHAR(255),[amount] VARCHAR(255),[date] DATETIME2,[fulfillment_method] VARCHAR(255),[opp_id] VARCHAR(255),[supplier] VARCHAR(1000),[line_items_nodeid] INT ,[customer_nodeid] INT ,[shipping_nodeid] INT,[total] VARCHAR(200),shipping VARCHAR(200) )
+            CREATE TABLE #ordercustomer(ID INT IDENTITY(1,1),OrderFileID INT,[orderid] VARCHAR(255),[city] VARCHAR(1000),[state] VARCHAR(1000),[customer_name] VARCHAR(1000),[zip] VARCHAR(1000),[country] VARCHAR(1000),[address1] VARCHAR(1000),[address2] VARCHAR(1000),[phone] VARCHAR(1000))
+            CREATE TABLE #orderitems(ID INT IDENTITY(1,1),OrderFileID INT,[orderid] VARCHAR(255),[item_name]  VARCHAR(2000) ,[sku]  VARCHAR(2000) ,[status]  VARCHAR(2000) ,[permalink]  VARCHAR(2000) ,[ship_by_date]  VARCHAR(2000) ,[voucher_code]  VARCHAR(2000) ,[weight]  VARCHAR(2000) ,[gg_account_number]  VARCHAR(2000) ,[po_number]  VARCHAR(2000) ,[channel_sku_provided]  VARCHAR(2000) ,[fulfillment_lineitem_id]  VARCHAR(2000) ,[unit_price]  VARCHAR(2000) ,[bom_sku]  VARCHAR(2000) ,[groupon_cost]  VARCHAR(2000) ,[opp_name]  VARCHAR(2000) ,[kitting_details]  VARCHAR(2000) ,[hts_code]  VARCHAR(2000) ,[ci_lineitemid]  VARCHAR(2000) ,[gift_message]  VARCHAR(2000) ,[coo]  VARCHAR(2000) ,[quantity]  VARCHAR(2000))
+            CREATE TABLE #ordershipping(ID INT IDENTITY(1,1),OrderFileID INT,[orderid] VARCHAR(255),[product_dimension_unit] VARCHAR(2000) ,[product_weight_unit] VARCHAR(2000) ,[product_weight] VARCHAR(2000) ,[incoterms] VARCHAR(2000) ,[3PL_warehouse] VARCHAR(2000) ,[3PL_name] VARCHAR(2000) ,[product_width] VARCHAR(2000) ,[product_length] VARCHAR(2000) ,[carrier] VARCHAR(2000) ,[product_height] VARCHAR(2000) ,[method] VARCHAR(2000))
+
+
+            INSERT INTO #orderlists(HeaderID,OrderID)           
+            SELECT DISTINCT ParentID,StringValue FROM #ResponseData WHERE NodeName='orderid'
+PRINT 'Order Count:'+LTRIM(@@ROWCOUNT)
+            ;WITH t AS (
+              SELECT r.ElementId,r.SequenceNo,r.ParentID,r.ObjectID,r.NodeName,r.ObjectID AS ObjectID2  FROM #ResponseData AS r WHERE r.ObjectID IS NOT NULL UNION ALL
+              SELECT r.ElementId,r.SequenceNo,r.ParentID,r.ObjectID,r.NodeName,t.ObjectID AS ObjectID2 FROM t INNER JOIN #ResponseData AS r ON r.ObjectID=t.ParentID WHERE t.NodeName IS NULL 
+             )
+             SELECT t.ElementId, t.ParentID,t.ObjectID,t.ObjectID2,t.NodeName INTO #NodeRef 
+             FROM t WHERE t.SequenceNo=0 ORDER BY t.ObjectID2
+
+
+            INSERT INTO #orderheader(OrderFileID,orderid,parent_orderid,amount,date,fulfillment_method,opp_id,supplier,line_items_nodeid,customer_nodeid,shipping_nodeid)
+            SELECT p.ParentID, [orderid],[parent_orderid],[amount],REPLACE([date],'UTC',''),[fulfillment_method],[opp_id],[supplier],[line_items],[customer],[shipping]
+            FROM ( 
+                SELECT d.StringValue,d.NodeName,d.ParentID
+                FROM #ResponseData AS d LEFT JOIN #NodeRef AS b ON b.ObjectID2=d.ParentID
+                WHERE b.NodeName='data' AND d.NodeName IS NOT NULL 
+            ) AS t
+            PIVOT (MAX(t.StringValue) FOR NodeName IN ([orderid],[parent_orderid],[amount],[date],[fulfillment_method],[opp_id],[supplier],[line_items],[customer],[shipping])
+            ) AS p
+PRINT 'Order Header:'+LTRIM(@@ROWCOUNT)
+            UPDATE h SET h.total=a.total,h.shipping=a.shipping
+            --SELECT *
+            FROM #orderheader AS h 
+            INNER JOIN ( 
+                 SELECT * 
+                 FROM ( 
+                   SELECT d.StringValue,d.NodeName,b.ParentID
+                      FROM #ResponseData AS d LEFT JOIN #NodeRef AS b ON b.ObjectID2=d.ParentID
+                     WHERE  b.NodeName='amount' AND d.NodeName IS NOT NULL 
+                   ) AS t PIVOT (MAX(t.StringValue) FOR NodeName IN ([total],[shipping])
+                 ) AS p
+          ) AS a ON a.ParentID=h.OrderFileID
+
+
+            INSERT INTO #ordercustomer(OrderFileID,orderid,city,state,customer_name,zip,country,address1,address2,phone)   
+            SELECT p.ParentID,p.OrderID, [city],[state],[name],[zip],[country],[address1],[address2],[phone]
+            FROM ( 
+                SELECT d.StringValue,d.NodeName,b.ParentID,l.OrderID
+                FROM #ResponseData AS d LEFT JOIN #NodeRef AS b ON b.ObjectID2=d.ParentID
+                LEFT JOIN #orderlists AS l ON l.HeaderID=b.ParentID
+                WHERE  b.NodeName='customer' AND d.NodeName IS NOT NULL 
+            ) AS t
+            PIVOT (MAX(t.StringValue) FOR NodeName IN ([city],[state],[name],[zip],[country],[address1],[address2],[phone])
+            ) AS p
+PRINT 'Order Customer:'+LTRIM(@@ROWCOUNT)
+--SELECT * FROM #orderitems
+            INSERT INTO #orderitems(OrderFileID,orderid,item_name,sku,status,permalink,ship_by_date,voucher_code,weight,gg_account_number,po_number
+                       ,channel_sku_provided,fulfillment_lineitem_id,unit_price,bom_sku,groupon_cost,opp_name,kitting_details,hts_code,ci_lineitemid,gift_message,coo,quantity)
+            SELECT OrderFileID,p.OrderID,[name],sku,status,permalink,ship_by_date,voucher_code,weight,gg_account_number,po_number
+                       ,channel_sku_provided,fulfillment_lineitem_id,unit_price,bom_sku,groupon_cost,opp_name,kitting_details,hts_code,ci_lineitemid,gift_message,coo,quantity --,@UploadID,@response
+            FROM (
+                SELECT d.ParentID,d.StringValue,d.NodeName,b.ParentID AS OrderFileID,l.OrderID
+                FROM #ResponseData AS d LEFT JOIN #NodeRef AS b ON b.ObjectID2=d.ParentID
+                LEFT JOIN #orderlists AS l ON l.HeaderID=b.ParentID
+                WHERE  b.NodeName='line_items' AND d.NodeName IS NOT NULL 
+            ) AS t PIVOT (MAX(t.StringValue) FOR NodeName IN ([bom_sku],[channel_sku_provided],[ci_lineitemid],[coo],[fulfillment_lineitem_id],[gg_account_number],[gift_message],[groupon_cost],[hts_code],[kitting_details],[name],[opp_name],[permalink],[po_number],[quantity],[ship_by_date],[sku],[status],[unit_price],[voucher_code],[weight]) 
+            ) AS p
+PRINT 'Order items:'+LTRIM(@@ROWCOUNT)
+            INSERT INTO #ordershipping(OrderFileID,orderid,product_dimension_unit,product_weight_unit,product_weight,incoterms,[3PL_warehouse],[3PL_name],product_width,product_length,carrier,product_height,method)    
+            SELECT p.ParentID,p.OrderID,[product_dimension_unit],[product_weight_unit],[product_weight],[incoterms],[3PL_warehouse],[3PL_name],[product_width],[product_length],[carrier],[product_height],[method]
+            FROM ( 
+                SELECT d.StringValue,d.NodeName,b.ParentID,l.OrderID
+                FROM #ResponseData AS d LEFT JOIN #NodeRef AS b ON b.ObjectID2=d.ParentID
+                LEFT JOIN #orderlists AS l ON l.HeaderID=b.ParentID
+                WHERE  b.NodeName='shipping' AND d.NodeName IS NOT NULL 
+            ) AS t
+            PIVOT (MAX(t.StringValue) FOR NodeName IN ([product_dimension_unit],[product_weight_unit],[product_weight],[incoterms],[3PL_warehouse],[3PL_name],[product_width],[product_length],[carrier],[product_height],[method])
+            ) AS p
+
+---SELECT ProcessStatus, *  FROM REST_GrouponOrdersDownload AS d where d.processstatus='N' order by orderid
+
+
+            SELECT [total],[shipping],[item_name],[sku],[status],[permalink],[ship_by_date],[voucher_code],[weight],[gg_account_number],[po_number],[channel_sku_provided],[fulfillment_lineitem_id],[unit_price],[bom_sku],[groupon_cost],[opp_name]
+                ,[kitting_details],[hts_code],[ci_lineitemid],[gift_message],[coo],[quantity],[city],[state],customer_name,[zip],[country],[address1],[address2],[phone],[product_dimension_unit],[product_weight_unit],[product_weight],[incoterms]
+                ,[3PL_warehouse],[3PL_name],[product_width],[product_length],[carrier],[product_height],[method],h.orderid[orderid],[parent_orderid],[amount],[date],[fulfillment_method],[opp_id],[supplier] 
+            --select *
+            FROM #orderlists ol
+            LEFT JOIN #orderheader AS h ON h.OrderFileID=ol.HeaderID
+            LEFT JOIN #ordercustomer AS c ON c.OrderFileID=h.OrderFileID AND c.orderid=h.orderid
+            LEFT JOIN #ordershipping AS s ON s.OrderFileID=h.OrderFileID AND s.orderid=h.orderid
+            LEFT JOIN #orderitems AS i ON i.OrderFileID=h.OrderFileID AND i.orderid=h.orderid
+
+         
+
+            IF OBJECT_ID('tempdb..#orderlists') IS NOT NULL DROP TABLE #orderlists
+            IF OBJECT_ID('tempdb..#NodeRef') IS NOT NULL DROP TABLE #NodeRef 
+            IF OBJECT_ID('tempdb..#orderheader') IS NOT NULL DROP TABLE #orderheader
+            IF OBJECT_ID('tempdb..#ordercustomer') IS NOT NULL DROP TABLE #ordercustomer 
+            IF OBJECT_ID('tempdb..#orderitems') IS NOT NULL DROP TABLE #orderitems 
+            IF OBJECT_ID('tempdb..#ordershipping') IS NOT NULL DROP TABLE #ordershipping 
+            IF OBJECT_ID('tempdb..#markexported') IS NOT NULL DROP TABLE #markexported 
+
+
+
+ 
